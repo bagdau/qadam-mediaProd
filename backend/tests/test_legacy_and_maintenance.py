@@ -5,7 +5,6 @@ import os
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
@@ -14,7 +13,7 @@ from sqlalchemy import select, update
 from app.legacy_migration import LegacyMigrationError, import_legacy
 from app.models import AuditLog, ConnectedAccount, MediaAsset, OAuthState, Publication, Session
 from app.services import maintenance
-from tests.conftest import make_account, make_media, make_user
+from tests.conftest import make_account, make_media
 
 
 # --------------------------------------------------------- legacy SQLite import
@@ -51,9 +50,9 @@ async def test_legacy_import_reencrypts_tokens_and_maps_events(sessions, crypto,
     assert account.user_id == user.id and account.scopes == ["user.info.basic", "video.publish"]
     assert crypto.decrypt(account.access_token_enc) == "legacy-access-SECRET"    # new key, readable
     assert "legacy-access" not in account.access_token_enc
-    assert {l.action for l in logs} == {"legacy.oauth", "legacy.direct_publish"}
-    assert all("LEAK" not in json.dumps(l.details) for l in logs)
-    assert min(l.created_at for l in logs).year == 2026
+    assert {log.action for log in logs} == {"legacy.oauth", "legacy.direct_publish"}
+    assert all("LEAK" not in json.dumps(log.details) for log in logs)
+    assert min(log.created_at for log in logs).year == 2026
     assert account.refresh_expires_at.year >= 2027
 
 

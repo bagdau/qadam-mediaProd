@@ -1,6 +1,6 @@
-# Normalise to LF: shell scripts, Dockerfiles and nginx templates must not contain CRLF (they run on Linux)
 * text=auto eol=lf
 *.ps1 text eol=crlf
 *.png binary
 *.jpg binary
 *.ico binary
+*.woff2 binary

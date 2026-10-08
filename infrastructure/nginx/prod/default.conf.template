@@ -1,0 +1,111 @@
+# PRODUCTION: TLS termination + routing. Rendered by the nginx image from ${SERVER_NAME} / ${MAX_UPLOAD_MB}.
+
+# Docker's embedded DNS: names are re-resolved every 10 s, so recreating a container
+# (deploy, restart) does not leave nginx pointing at a stale IP.
+resolver 127.0.0.11 valid=10s ipv6=off;
+
+# Container health probe (not published)
+server {
+    listen 127.0.0.1:8081;
+    access_log off;
+    location = /nginx-health { return 200 "ok\n"; }
+}
+
+# HTTP: ACME challenges, everything else goes to HTTPS
+server {
+    listen 8080;
+    server_name ${SERVER_NAME};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# Anything addressed to another hostname (or an IP) is dropped without a response
+server {
+    listen 8080 default_server;
+    listen 8443 ssl default_server;
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 8443 ssl;
+    http2 on;
+    server_name ${SERVER_NAME};
+
+    set $backend_api  http://backend:8000;
+    set $frontend_app http://frontend:8080;
+
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # Security headers (the API adds its own, stricter ones)
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.tiktokcdn.com https://*.tiktokcdn-us.com https://*.tiktokcdn-eu.com; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
+
+    client_max_body_size 1m;
+    limit_conn perip 40;
+
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    # Always forward the canonical host, whatever the client sent
+    proxy_set_header Host ${SERVER_NAME};
+    proxy_set_header X-Real-IP $remote_addr;
+    # We are the edge: overwrite, never append client-supplied values.
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 5s;
+
+    # Video upload: stream straight to the backend, large body, long timeouts
+    location = /api/v1/media {
+        limit_req zone=upload burst=5 nodelay;
+        client_max_body_size ${MAX_UPLOAD_MB}m;
+        client_body_timeout 600s;
+        proxy_request_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_pass $backend_api;
+    }
+
+    location = /api/v1/auth/login {
+        limit_req zone=login burst=10 nodelay;
+        proxy_pass $backend_api;
+    }
+
+    location /api/ {
+        limit_req zone=api burst=60 nodelay;
+        proxy_read_timeout 60s;
+        proxy_pass $backend_api;
+    }
+
+    # TikTok redirects the browser here after consent
+    location /oauth/ {
+        limit_req zone=api burst=10 nodelay;
+        proxy_pass $backend_api;
+    }
+
+    location = /health/live {
+        access_log off;
+        proxy_pass $backend_api;
+    }
+
+    location / {
+        proxy_pass $frontend_app;
+    }
+}

@@ -1,0 +1,208 @@
+# PRODUCTION stack:
+#   scripts/init-secrets.sh              # once: generates ./secrets/*
+#   cp .env.example .env && edit         # SERVER_NAME, PUBLIC_URL, TIKTOK_*...
+#   (put fullchain.pem/privkey.pem into ./infrastructure/nginx/certs, or run scripts/gen-dev-cert.sh for a test cert)
+#   docker compose -f compose.prod.yaml up -d --build
+#
+# Secrets are Docker secrets (files under /run/secrets), never environment variables.
+# Only nginx publishes ports (80/443). PostgreSQL and Redis are on an internal network.
+name: qadam-media
+
+x-hardening: &hardening
+  restart: unless-stopped
+  init: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging: &logging
+    driver: json-file
+    options: {max-size: "20m", max-file: "5"}
+
+x-backend: &backend
+  <<: *hardening
+  image: ${BACKEND_IMAGE:-qadam-media-backend:latest}
+  read_only: true
+  tmpfs: ["/tmp"]
+  environment: &backend-env
+    ENVIRONMENT: production
+    LOG_JSON: "true"
+    PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL (https://your-domain) in .env}
+    ALLOWED_HOSTS: ${SERVER_NAME:?set SERVER_NAME in .env}
+    COOKIE_SECURE: "true"
+    POSTGRES_HOST: postgres
+    REDIS_URL: redis://redis:6379/0
+    TIKTOK_CLIENT_KEY: ${TIKTOK_CLIENT_KEY:?set TIKTOK_CLIENT_KEY in .env}
+    TIKTOK_REDIRECT_URI: ${TIKTOK_REDIRECT_URI:?set TIKTOK_REDIRECT_URI in .env}
+    TIKTOK_SCOPES: ${TIKTOK_SCOPES:-user.info.basic,video.publish}
+    TIKTOK_CLIENT_AUDITED: ${TIKTOK_CLIENT_AUDITED:-false}
+    BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+    MAX_VIDEO_MB: ${MAX_VIDEO_MB:-512}
+    # multipart uploads are spooled to disk (the media volume), not to the RAM-backed /tmp tmpfs
+    TMPDIR: /data/media/.tmp
+  secrets: &backend-secrets
+    - postgres_password
+    - redis_password
+    - secret_key
+    - encryption_keys
+    - tiktok_client_secret
+    - bootstrap_admin_password
+  volumes:
+    - media_data:/data/media
+  networks: [data, edge]
+
+services:
+  postgres:
+    <<: *hardening
+    image: postgres:17-alpine
+    # the official image starts as root, chowns its data dir and then drops to the postgres user
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    environment:
+      POSTGRES_USER: qadam
+      POSTGRES_DB: qadam
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qadam -d qadam"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    stop_grace_period: 60s
+    networks: [data]
+
+  redis:
+    <<: *hardening
+    image: redis:7-alpine
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$(cat /run/secrets/redis_password)\" --appendonly yes"]
+    user: "999:1000"   # the image's redis user; runs unprivileged from the start (no root entrypoint, no capabilities)
+    secrets: [redis_password]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$(cat /run/secrets/redis_password)\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [data]
+
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  backend:
+    <<: *backend
+    build:
+      context: ./backend     # the one place the shared backend image is built
+    stop_grace_period: 40s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  worker:
+    <<: *backend
+    command: ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=INFO", "--concurrency=${WORKER_CONCURRENCY:-2}"]
+    stop_grace_period: 120s     # warm shutdown lets a running upload finish
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping -d celery@$$HOSTNAME --timeout 5 >/dev/null 2>&1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  beat:
+    <<: *backend
+    command: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=INFO",
+              "--schedule", "/var/run/beat/celerybeat-schedule", "--pidfile", "/var/run/beat/beat.pid"]
+    volumes:
+      - beat_data:/var/run/beat
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(int(open('/var/run/beat/beat.pid').read()), 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  frontend:
+    <<: *hardening
+    image: ${FRONTEND_IMAGE:-qadam-media-frontend:latest}
+    build:
+      context: ./frontend
+      target: production
+    read_only: true
+    tmpfs: ["/tmp"]
+    networks: [edge]
+
+  nginx:
+    <<: *hardening
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    read_only: false    # the image renders /etc/nginx/templates at start
+    environment:
+      SERVER_NAME: ${SERVER_NAME:?set SERVER_NAME in .env}
+      MAX_UPLOAD_MB: ${MAX_VIDEO_MB:-512}
+      NGINX_ENVSUBST_FILTER: "^(SERVER_NAME|MAX_UPLOAD_MB)$$"
+    ports:
+      - "80:8080"
+      - "443:8443"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infrastructure/nginx/prod:/etc/nginx/templates:ro
+      - ./infrastructure/nginx/certs:/etc/nginx/certs:ro
+      - acme_webroot:/var/www/certbot:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8081/nginx-health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    stop_grace_period: 30s
+    depends_on:
+      backend: {condition: service_healthy}
+      frontend: {condition: service_healthy}
+    networks: [edge]
+
+  # Optional: Let's Encrypt (HTTP-01 through nginx). Use scripts/issue-cert.sh (issue + install + reload; rerun from cron to renew).
+  certbot:
+    image: certbot/certbot:latest
+    profiles: [tls]
+    entrypoint: ["certbot", "certonly", "--webroot", "-w", "/var/www/certbot", "--non-interactive", "--agree-tos",
+                 "--keep-until-expiring", "--email", "${LETSENCRYPT_EMAIL:-}", "-d", "${SERVER_NAME}"]
+    volumes:
+      - acme_webroot:/var/www/certbot
+      - letsencrypt:/etc/letsencrypt
+      - ./infrastructure/nginx/certs:/out
+    networks: [edge]
+
+networks:
+  data:
+    internal: true
+  edge: {}
+
+volumes:
+  pg_data:
+  redis_data:
+  media_data:
+  beat_data:
+  acme_webroot:
+  letsencrypt:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  redis_password:
+    file: ./secrets/redis_password
+  secret_key:
+    file: ./secrets/secret_key
+  encryption_keys:
+    file: ./secrets/encryption_keys
+  tiktok_client_secret:
+    file: ./secrets/tiktok_client_secret
+  bootstrap_admin_password:
+    file: ./secrets/bootstrap_admin_password

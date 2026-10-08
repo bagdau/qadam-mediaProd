@@ -1,0 +1,189 @@
+# DEVELOPMENT stack:  cp .env.example .env  &&  docker compose up --build
+# Open http://localhost:8080   (add `--profile mock` for the local TikTok stand-in)
+#
+# PostgreSQL and Redis live on an internal network and publish NO ports.
+name: qadam-media-dev
+
+x-backend: &backend
+  image: qadam-media-backend:dev
+  restart: unless-stopped
+  init: true
+  environment: &backend-env
+    ENVIRONMENT: development
+    LOG_JSON: "false"
+    PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+    COOKIE_SECURE: "false"
+    POSTGRES_HOST: postgres
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    REDIS_URL: redis://redis:6379/0
+    REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+    ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:?set ENCRYPTION_KEYS in .env (python -m app.cli generate-key)}
+    TIKTOK_CLIENT_KEY: ${TIKTOK_CLIENT_KEY:-}
+    TIKTOK_CLIENT_SECRET: ${TIKTOK_CLIENT_SECRET:-}
+    TIKTOK_REDIRECT_URI: ${TIKTOK_REDIRECT_URI:-http://localhost:8080/oauth/tiktok/callback}
+    TIKTOK_SCOPES: ${TIKTOK_SCOPES:-user.info.basic,video.publish,video.upload}
+    TIKTOK_CLIENT_AUDITED: ${TIKTOK_CLIENT_AUDITED:-false}
+    TIKTOK_AUTHORIZE_URL: ${TIKTOK_AUTHORIZE_URL:-https://www.tiktok.com/v2/auth/authorize/}
+    TIKTOK_API_BASE: ${TIKTOK_API_BASE:-https://open.tiktokapis.com/v2}
+    BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+    BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+    MAX_VIDEO_MB: ${MAX_VIDEO_MB:-512}
+    TMPDIR: /data/media/.tmp
+  volumes:
+    - media_data:/data/media
+  networks: [data, edge]
+  logging: &logging
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    init: true
+    environment:
+      POSTGRES_USER: qadam
+      POSTGRES_DB: qadam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qadam -d qadam"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [data]
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    init: true
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [data]
+    logging: *logging
+
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  backend:
+    <<: *backend
+    build:
+      context: ./backend     # the one place the shared backend image is built
+    command: ["uvicorn", "app.main:app_factory", "--factory", "--host", "0.0.0.0", "--port", "8000",
+              "--reload", "--reload-dir", "/app/app", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]
+    volumes:
+      - media_data:/data/media
+      - ./backend/app:/app/app:ro
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  worker:
+    <<: *backend
+    command: ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app inspect ping -d celery@$$HOSTNAME --timeout 5 >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  beat:
+    <<: *backend
+    command: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=INFO",
+              "--schedule", "/var/run/beat/celerybeat-schedule", "--pidfile", "/var/run/beat/beat.pid"]
+    volumes:
+      - beat_data:/var/run/beat
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(int(open('/var/run/beat/beat.pid').read()), 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    restart: unless-stopped
+    init: true
+    environment:
+      VITE_BACKEND_URL: http://backend:8000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+    networks: [edge]
+    logging: *logging
+
+  nginx:
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    restart: unless-stopped
+    init: true
+    environment:
+      MAX_UPLOAD_MB: ${MAX_VIDEO_MB:-512}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infrastructure/nginx/dev:/etc/nginx/templates:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8081/nginx-health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      backend: {condition: service_started}
+      frontend: {condition: service_started}
+    networks: [edge]
+    logging: *logging
+
+  # Local stand-in for TikTok: docker compose --profile mock up
+  # then set in .env: TIKTOK_API_BASE=http://mock-tiktok:9000/v2
+  #                   TIKTOK_AUTHORIZE_URL=http://localhost:8080/mock-tiktok/v2/auth/authorize/
+  #                   TIKTOK_CLIENT_KEY=mock  TIKTOK_CLIENT_SECRET=mock-secret
+  mock-tiktok:
+    image: qadam-media-backend:dev
+    profiles: [mock]
+    restart: unless-stopped
+    command: ["uvicorn", "devtools.mock_tiktok:app", "--host", "0.0.0.0", "--port", "9000", "--no-access-log"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/docs', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [edge]
+
+networks:
+  # internal: no route to or from the outside world; only PostgreSQL/Redis live here exclusively
+  data:
+    internal: true
+  edge: {}
+
+volumes:
+  pg_data:
+  redis_data:
+  media_data:
+  beat_data:

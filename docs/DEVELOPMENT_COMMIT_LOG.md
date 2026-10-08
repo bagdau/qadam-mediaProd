@@ -115,3 +115,4 @@ and follows Conventional Commits.
 107. `fix: link operational migration to actual revision`
 108. `chore: remove redundant domain package newline`
 109. `docs: publish development commit journal`
+110. `ci: preserve full integration checks on development`

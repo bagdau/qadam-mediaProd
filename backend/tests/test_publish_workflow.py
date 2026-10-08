@@ -9,10 +9,10 @@ import pytest
 from sqlalchemy import select, text, update
 
 from app.integrations.tiktok import chunks
-from app.models import AuditLog, ConnectedAccount, Publication, PublicationEvent
+from app.models import ConnectedAccount, Publication, PublicationEvent
 from app.services.publishing import RetryLater
 from tests.conftest import make_account, make_media
-from tests.fake_tiktok import UPLOAD_URL, api_error, ok
+from tests.fake_tiktok import UPLOAD_URL, api_error
 
 
 @pytest.fixture
@@ -85,7 +85,7 @@ async def test_large_video_is_uploaded_in_sequential_chunks(workflow, sessions, 
     assert plan.total_chunks == size // 8_000 >= 3
     body = tiktok_mock.last_init_body["source_info"]
     assert body == {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": 8_000, "total_chunk_count": plan.total_chunks}
-    sent = [(f, l) for f, l, _t, _h in tiktok_mock.uploaded]
+    sent = [(first, last) for first, last, _total, _headers in tiktok_mock.uploaded]
     assert sent == plan.ranges()  # in order, contiguous, last chunk absorbs the remainder
     assert (await reload(sessions, pub.id)).uploaded_bytes == size
 

@@ -118,7 +118,7 @@ async def insert_user(db, email="u@example.com"):
 
 async def test_constraints_reject_bad_data(sessions):
     async with sessions() as db:
-        uid = await insert_user(db)
+        await insert_user(db)
         await db.commit()
     for sql, params in [
         ("INSERT INTO users (id,email,password_hash,display_name,role) VALUES (gen_random_uuid(),'u@example.com','x','','member')", {}),  # duplicate email

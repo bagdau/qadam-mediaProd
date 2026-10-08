@@ -19,6 +19,11 @@ class ConnectedAccount(UUIDPrimaryKey, Timestamps, Base):
         CheckConstraint("provider IN ('tiktok')", name="provider_valid"),
         Index("ix_connected_accounts_user_id_status", "user_id", "status"),
         Index("ix_connected_accounts_access_expires_at", "access_expires_at"),
+        Index(
+            "ix_connected_accounts_refresh_due",
+            "access_expires_at",
+            postgresql_where="status = 'active' AND refresh_token_enc IS NOT NULL",
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -47,6 +52,7 @@ class OAuthState(UUIDPrimaryKey, CreatedAt, Base):
     __table_args__ = (
         Index("ix_oauth_states_expires_at", "expires_at"),
         Index("ix_oauth_states_user_id", "user_id"),
+        Index("ix_oauth_states_unconsumed_expiry", "expires_at", postgresql_where="consumed_at IS NULL"),
     )
 
     state_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)

@@ -17,6 +17,7 @@ class User(UUIDPrimaryKey, Timestamps, Base):
         CheckConstraint(f"role IN ({sql_in(UserRole)})", name="role_valid"),
         # e-mail is normalised to lower case in the service layer; the constraint enforces it
         CheckConstraint("email = lower(email)", name="email_lowercase"),
+        Index("ix_users_active_locked_until", "locked_until", postgresql_where="is_active = true"),
     )
 
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
@@ -31,7 +32,10 @@ class User(UUIDPrimaryKey, Timestamps, Base):
 
 class Session(UUIDPrimaryKey, CreatedAt, Base):
     __tablename__ = "sessions"
-    __table_args__ = (Index("ix_sessions_user_id_expires_at", "user_id", "expires_at"),)
+    __table_args__ = (
+        Index("ix_sessions_user_id_expires_at", "user_id", "expires_at"),
+        Index("ix_sessions_active_expires_at", "expires_at", postgresql_where="revoked_at IS NULL"),
+    )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False

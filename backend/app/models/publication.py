@@ -35,6 +35,7 @@ class Publication(UUIDPrimaryKey, Timestamps, Base):
         Index("ix_publications_account_id_status", "account_id", "status"),
         Index("ix_publications_status_updated_at", "status", "updated_at"),
         Index("ix_publications_media_id", "media_id"),
+        Index("ix_publications_poll_due", "next_poll_at", postgresql_where="status = 'PROCESSING'"),
         # a TikTok publish_id may belong to a single publication only
         Index(
             "uq_publications_tiktok_publish_id",

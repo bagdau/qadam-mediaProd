@@ -13,6 +13,15 @@ React-интерфейс, FastAPI-бэкенд, PostgreSQL, фоновые за�
                                    └─ общий том media_data ◀──┘     beat (расписание)
 ```
 
+
+## 👥 Contributors
+
+Special thanks to the developers who contributed to Qadam Media.
+
+- [@bagdau](https://github.com/bagdau) — Project Owner
+- [@zamdirectortech-max](https://github.com/zamdirectortech-max) — Developer
+- [@napoleonrs22](https://github.com/napoleonrs22) — Developer
+
 ## Что умеет
 
 | Раздел | Возможности |

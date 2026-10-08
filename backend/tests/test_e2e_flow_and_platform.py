@@ -6,16 +6,14 @@ import uuid
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-from pydantic import SecretStr
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import select
 
 from app import cli
 from app.main import create_app
-from app.models import Publication
-from app.services.publishing import PublishingWorkflow, RetryLater
+from app.services.publishing import RetryLater
 from app.workers import tasks
-from tests.conftest import login, make_user
 from tests.fake_tiktok import GOOD_CODE
 from tests.helpers import make_mp4
 

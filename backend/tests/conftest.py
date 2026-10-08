@@ -56,8 +56,7 @@ from app.services.media import MediaService  # noqa: E402
 from app.services.publications import PublicationService  # noqa: E402
 from app.services.publishing import PublishingWorkflow, WorkflowDeps  # noqa: E402
 from app.services.tiktok_accounts import TikTokAccountService  # noqa: E402
-
-from tests.fake_tiktok import FakeTikTok, OPEN_ID  # noqa: E402
+from tests.fake_tiktok import OPEN_ID, FakeTikTok  # noqa: E402
 from tests.helpers import make_mp4  # noqa: E402
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]

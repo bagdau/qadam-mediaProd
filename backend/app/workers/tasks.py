@@ -45,7 +45,7 @@ async def runtime():
         await redis.aclose()
 
 
-def run(coro_factory: Callable[[WorkflowDeps, TikTokAccountService], Awaitable[T]]) -> T:
+def run(coro_factory: Callable[[WorkflowDeps, TikTokAccountService], Awaitable[T]]) -> T:  # noqa: UP047
     async def main() -> T:
         async with runtime() as (deps, service):
             return await coro_factory(deps, service)
